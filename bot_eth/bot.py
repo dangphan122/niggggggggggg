@@ -30,9 +30,21 @@ from config import (
     MIN_EXECUTION_WEIGHT, MIN_TRADE_USD as CFG_MIN_TRADE,
     MAX_PRICE_DEVIATION as CFG_PRICE_DEV,
     MIN_ASK_LIQUIDITY_USD as CFG_MIN_LIQ,
+    # Unified Defense Architecture
+    VRP_DISCOUNT, MOMENTUM_THRESHOLD, TREND_VETO_PCT, EDGE_SPREAD_MULTIPLIER,
 )
 from paper_trader import PaperTrader
 from dashboard import create_app
+
+# Live Execution Engine (graceful degradation — paper-trades if not configured)
+try:
+    from live_trader import LiveExecutor, PRAGMATIC_MIN_ORDER as _LIVE_MIN
+    _LIVE_KEY = __import__("os").environ.get("POLY_PRIVATE_KEY", "")
+    _LIVE_FUNDER = __import__("os").environ.get("POLY_FUNDER_ADDRESS", None)
+    LIVE_MODE = bool(_LIVE_KEY)
+except ImportError:
+    LIVE_MODE = False
+    _LIVE_MIN = 5.0
 
 # ===================== CONFIGURATION =================================
 MODEL_BUFFER = 0.02          # 2% IV/drift tolerance
@@ -70,6 +82,18 @@ class TradingBot:
         self.status = "INIT"
         self.start_time = time.time()
 
+        # Live execution engine (None = paper-trade mode)
+        if LIVE_MODE:
+            self.executor = LiveExecutor(
+                host="https://clob.polymarket.com",
+                key=_LIVE_KEY,
+                funder=_LIVE_FUNDER,
+            )
+            log.info("LIVE MODE ACTIVE — real orders will be placed on Polymarket")
+        else:
+            self.executor = None
+            log.info("PAPER MODE — set POLY_PRIVATE_KEY env var to enable live trading")
+
     async def run(self):
         log.info("=" * 60)
         log.info("  QUANT ARB ENGINE — Paper Trading v2")
@@ -94,12 +118,15 @@ class TradingBot:
         self.status = "RUNNING"
 
         # Run all async loops
-        await asyncio.gather(
+        tasks = [
             self.feed.run(),
             self.oracle.run(poll_sec=ORACLE_POLL_SEC),
             self._strategy_loop(),
             self._maker_loop(),
-        )
+        ]
+        if self.executor:
+            tasks.append(self.executor.garbage_collector())  # Ghost Equity GC
+        await asyncio.gather(*tasks)
 
     # === STRATEGY LOOP ===============================================
 
@@ -151,6 +178,43 @@ class TradingBot:
 
         now_ts = datetime.now(timezone.utc).timestamp()
 
+        # ══════════════════════════════════════════════════════════════════
+        # LAYER 2 — MARKET REGIME SHIELD
+        # ══════════════════════════════════════════════════════════════════
+        eth_hist = list(self.feed.eth_history)  # deque of {"p": price, "t": ts}
+
+        # Layer 2A — Volatility Circuit Breaker (15-min chaos)
+        if len(eth_hist) >= 5:
+            import math
+            prices_rv = [h["p"] for h in eth_hist[-20:]]
+            if len(prices_rv) >= 2:
+                log_rets = [math.log(prices_rv[i] / prices_rv[i-1])
+                            for i in range(1, len(prices_rv))
+                            if prices_rv[i-1] > 0]
+                if log_rets:
+                    mean_r = sum(log_rets) / len(log_rets)
+                    rv = (sum((r - mean_r)**2 for r in log_rets) / len(log_rets)) ** 0.5
+                    if rv > MOMENTUM_THRESHOLD:
+                        log.info("REGIME SHIELD | Vol Circuit Breaker ACTIVE rv=%.4f > %.4f | Freezing entries", rv, MOMENTUM_THRESHOLD)
+                        return
+
+        # Layer 2B — Directional Veto (1-hour trend)
+        veto_yes = False  # forbid YES entries
+        veto_no  = False  # forbid NO entries
+        hour_ago_ts = now_ts - 3600
+        hist_1h = [h for h in eth_hist if h.get("t", 0) >= hour_ago_ts]
+        if len(hist_1h) >= 2:
+            p_now  = hist_1h[-1]["p"]
+            p_1h   = hist_1h[0]["p"]
+            drift  = (p_now - p_1h) / p_1h if p_1h > 0 else 0
+            if drift > TREND_VETO_PCT:
+                veto_no = True   # Strong uptrend — forbid betting ETH stays below
+                log.info("REGIME SHIELD | Uptrend Veto drift=+%.2f%% | NO entries blocked", drift*100)
+            elif drift < -TREND_VETO_PCT:
+                veto_yes = True  # Strong downtrend — forbid betting ETH ends above
+                log.info("REGIME SHIELD | Downtrend Veto drift=%.2f%% | YES entries blocked", drift*100)
+        # ══════════════════════════════════════════════════════════════════
+
         # current bids for mark-to-market
         current_bids = {}
         for br in brackets:
@@ -179,11 +243,14 @@ class TradingBot:
             iv, exp_code = self.oracle.get_iv_for_date(target_dt, br.strike)
             if iv is None or iv <= 0:
                 continue
-            p_real = calculate_nd2(spot, br.strike, t_years, iv)
+            # LAYER 1: VRP Discount — haircut IV before N(d2) to strip the risk premium
+            adjusted_iv = iv * VRP_DISCOUNT
+            p_real = calculate_nd2(spot, br.strike, t_years, adjusted_iv)
             if not _ok(p_real):
                 continue
             bd[(br.strike, br.end_ts)] = dict(
-                p_real=p_real, iv=iv, t_years=t_years, exp_code=exp_code, br=br)
+                p_real=p_real, iv=iv, adjusted_iv=adjusted_iv,
+                t_years=t_years, exp_code=exp_code, br=br)
 
         if not bd:
             return
@@ -203,37 +270,52 @@ class TradingBot:
                 br  = info["br"]
                 ybk = self.feed.get_book(br.yes_tid)
                 if not ybk: continue
-                
+
                 best_bid = ybk.bb()
                 best_ask = ybk.ba()
                 if not best_bid or not best_ask or best_bid <= 0 or best_ask <= 0: continue
-                
+
                 p_real = info["p_real"]
-                yes_ask = best_ask
+
+                # TRUE INDEPENDENT SPREAD-ADJUSTED EDGES
+                # YES: cost = ask_yes  (buy YES at the offer)
+                yes_ask  = best_ask
                 yes_edge = p_real - yes_ask
-                
-                no_ask = 1.0 - best_bid
+
+                # NO: cost = 1 - bid_yes  (i.e. what you pay including the spread)
+                # Using 1 - bid_yes is correct; using 1 - ask_yes would ignore spread cost
+                no_ask   = 1.0 - best_bid
                 no_p_real = 1.0 - p_real
-                no_edge = no_p_real - no_ask
-                
-                valid_yes = yes_ask <= 0.40
-                valid_no  = no_ask  <= 0.40
-                
-                target_side = "YES"
-                target_price = yes_ask
+                no_edge  = no_p_real - no_ask
+
+                # Price ceiling check + LAYER 2B Directional Veto
+                spread     = max(0.0, best_ask - best_bid)
+                edge_floor = EDGE_SPREAD_MULTIPLIER * spread  # Layer 3
+
+                valid_yes = yes_ask <= 0.40 and not veto_yes
+                valid_no  = no_ask  <= 0.40 and not veto_no
+
+                # LAYER 3: Spread-Adjusted Edge Floor — edge must exceed 1.5x spread
+                valid_yes = valid_yes and yes_edge > edge_floor
+                valid_no  = valid_no  and no_edge  > edge_floor
+
+                # Choose the side with the better independent spread-adjusted edge
                 if valid_yes and valid_no:
                     if no_edge > yes_edge:
-                        target_side = "NO"
-                        target_price = no_ask
-                elif valid_no and not valid_yes:
-                    target_side = "NO"
-                    target_price = no_ask
-                elif not valid_yes and not valid_no:
+                        target_side, target_price, actual_edge = "NO",  no_ask,  no_edge
+                    else:
+                        target_side, target_price, actual_edge = "YES", yes_ask, yes_edge
+                elif valid_yes:
+                    target_side, target_price, actual_edge = "YES", yes_ask, yes_edge
+                elif valid_no:
+                    target_side, target_price, actual_edge = "NO",  no_ask,  no_edge
+                else:
                     continue
-                    
+
                 strike_probs[strike] = p_real
                 entry_prices[strike] = target_price
-                sides[strike] = target_side
+                sides[strike]        = target_side
+                info["actual_edge"]  = actual_edge   # carry true edge into logging
                 info_map[strike]     = info
 
             if not strike_probs:
@@ -338,31 +420,47 @@ class TradingBot:
                 if action == "TAKER_FAK" and best_ask:
                     allocation_usd = min(allocation_usd, ask_size * best_ask)
 
-                if allocation_usd < MIN_TRADE_USD:
+                # ── Pragmatic floor: $0.50 min (gas efficiency on Polygon) ──
+                min_order = _LIVE_MIN if LIVE_MODE else MIN_TRADE_USD
+                if allocation_usd < min_order:
                     continue
                 # ── END 3D RISK MATRIX ────────────────────────────────────────
 
-                edge = (p_real - best_ask) if best_ask else 0
+                # Use the TRUE spread-adjusted edge for the chosen side, not a YES-only proxy
+                side  = sides[strike]
+                edge  = info.get("actual_edge", (p_real - best_ask) if best_ask else 0)
+                adj_iv = info.get("adjusted_iv", iv)
                 self.trader._add_log(
-                    f"SIGNAL | ${strike:,} | edge={edge:.4f} | "
+                    f"{'🟢 LIVE' if LIVE_MODE else '📝 PAPER'} SIGNAL | ${strike:,} | {side} edge={edge:.4f} | "
                     f"kelly={weight:.3f}→{final_weight:.3f} | "
                     f"${allocation_usd:.2f} | {action} | "
-                    f"T={info['t_years']*365:.1f}d iv={iv*100:.1f}% "
+                    f"T={info['t_years']*365:.1f}d iv={iv*100:.1f}%→{adj_iv*100:.1f}%(adj) "
                     f"[{info['exp_code']}] tier={tier_cap*100:.1f}%")
 
-                entry_reason = (f"edge={edge*100:.1f}% kelly={weight:.3f}→{final_weight:.3f} "
-                                f"iv={iv*100:.1f}% T={info['t_years']*365:.1f}d "
+                entry_reason = (f"{side} edge={edge*100:.1f}% kelly={weight:.3f}→{final_weight:.3f} "
+                                f"iv_raw={iv*100:.1f}% iv_adj={adj_iv*100:.1f}% T={info['t_years']*365:.1f}d "
                                 f"deribit={info['exp_code']} tier={tier_cap*100:.1f}%")
-                if action == "TAKER_FAK":
-                    await self.trader.submit_taker(
-                        strike, target_price, allocation_usd, end_ts,
-                        event_title=br.event_title, entry_reason=entry_reason,
-                        edge=edge, book=ybk, ask_size=avail_size, side=side)
-                elif action == "MAKER_POST_ONLY":
-                    await self.trader.submit_maker(
-                        strike, target_price, allocation_usd, end_ts,
-                        event_title=br.event_title, entry_reason=entry_reason,
-                        edge=edge, book=ybk, yes_tid=br.yes_tid, side=side)
+
+                if LIVE_MODE and self.executor:
+                    # ── LIVE EXECUTION: route through LiveExecutor ──────────────
+                    # LiveExecutor handles: FOK vs GTC L2 routing, GC registration
+                    token_id = br.yes_tid if side == "YES" else br.no_tid
+                    await self.executor.execute(
+                        token_id=token_id, strike=strike, side=side,
+                        limit_price=target_price, allocation_usd=allocation_usd,
+                        book=ybk, event_title=br.event_title)
+                else:
+                    # ── PAPER TRADING: simulate fills ───────────────────────────
+                    if action == "TAKER_FAK":
+                        await self.trader.submit_taker(
+                            strike, target_price, allocation_usd, end_ts,
+                            event_title=br.event_title, entry_reason=entry_reason,
+                            edge=edge, book=ybk, ask_size=avail_size, side=side)
+                    elif action == "MAKER_POST_ONLY":
+                        await self.trader.submit_maker(
+                            strike, target_price, allocation_usd, end_ts,
+                            event_title=br.event_title, entry_reason=entry_reason,
+                            edge=edge, book=ybk, yes_tid=br.yes_tid, side=side)
 
         # --- Phase 4: Lifecycle (Smart TP) ---
         now = datetime.now(timezone.utc)

@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger("paper_trader")
 
-INITIAL_CAPITAL = 1000.0
+INITIAL_CAPITAL = 200.0
 MAKER_FILL_PROBABILITY = 0.60
 MAKER_FILL_DELAY_MIN = 5
 MAKER_FILL_DELAY_MAX = 30

@@ -47,6 +47,7 @@ def create_app(bot):
             "brackets_count": len(f.get_brackets()),
             "uptime_sec": int(time.time() - bot.start_time),
             "status": bot.status,
+            "live_mode": getattr(bot, "executor", None) is not None,
         })
 
     @app.route("/api/positions")
@@ -81,6 +82,7 @@ def create_app(bot):
                 "edge_entry": round(pos.edge_at_entry * 100, 2),
                 "runtime_min": round(runtime_min, 1),
                 "entry_reason": pos.entry_reason,
+                "side": pos.side,
             })
         return jsonify(result)
 
@@ -195,7 +197,7 @@ tr:last-child td{border:none}
       <h1 class="text-xl font-bold bg-gradient-to-r from-cyan-400 via-blue-400 to-violet-400 bg-clip-text text-transparent tracking-tight">
         ⚡ Quant Arb Engine
       </h1>
-      <p class="text-xs text-slate-600">Multi-Strike Probability Arbitrage · Paper Trading</p>
+      <p class="text-xs text-slate-600">Multi-Strike Probability Arbitrage <span id="modeBadge" class="ml-2 px-2 py-0.5 rounded text-[10px] font-bold tracking-wider"></span></p>
     </div>
     <div class="flex items-center gap-3">
       <span id="statusBadge" class="badge"></span>
@@ -253,6 +255,7 @@ tr:last-child td{border:none}
           <thead><tr>
             <th>Event / Strike</th>
             <th>Type</th>
+            <th>Side</th>
             <th>Entry</th>
             <th>Current</th>
             <th>Tokens</th>
@@ -313,6 +316,7 @@ tr:last-child td{border:none}
           <th>Time</th>
           <th>Event</th>
           <th>Type</th>
+          <th>Side</th>
           <th>Strike</th>
           <th>Tokens</th>
           <th>Entry</th>
@@ -379,6 +383,15 @@ async function poll() {
       'bg-green-500/20 text-green-400 border border-green-500/30' :
       'bg-slate-500/20 text-slate-400 border border-slate-500/30');
 
+    const mb = $('modeBadge');
+    if (stats.live_mode) {
+      mb.textContent = '🔴 LIVE EXECUTION';
+      mb.className = 'ml-2 px-2 py-0.5 rounded text-[10px] font-bold tracking-wider bg-red-900/40 text-red-400 border border-red-800/50';
+    } else {
+      mb.textContent = '📝 PAPER TRADING';
+      mb.className = 'ml-2 px-2 py-0.5 rounded text-[10px] font-bold tracking-wider bg-blue-900/30 text-blue-300 border border-blue-800/50';
+    }
+
     // Open Positions
     const pt = $('posTable'); pt.innerHTML='';
     if (pos.length) {
@@ -395,6 +408,10 @@ async function poll() {
             <div class="text-xs text-slate-500 truncate max-w-[160px]">${p.event}</div>
           </td>
           <td>${typeTag}</td>
+          <td>${p.side === 'YES'
+            ? '<span style="color:#22d3ee;font-size:10px;background:rgba(34,211,238,.12);padding:1px 7px;border-radius:4px;font-weight:700">YES</span>'
+            : '<span style="color:#fb923c;font-size:10px;background:rgba(251,146,60,.12);padding:1px 7px;border-radius:4px;font-weight:700">NO</span>'
+          }</td>
           <td class="font-mono text-slate-300">${fmt(p.entry, 4)}</td>
           <td class="font-mono"><span class="${pdirColor}">${pdir} ${fmt(p.current, 4)}</span></td>
           <td class="font-mono">${fmt(p.tokens, 1)}</td>
@@ -419,7 +436,12 @@ async function poll() {
       else if (l.includes('SIGNAL')) color = 'text-cyan-400';
       else if (l.includes('SKIP') || l.includes('MISS')) color = 'text-slate-600';
       else if (l.includes('RESOLVED')) color = 'text-violet-400';
-      return `<div class="${color}">${l}</div>`;
+      else if (l.includes('REGIME SHIELD')) color = 'text-rose-400';
+      // Inline YES/NO highlighting within the log line text
+      const hl = l
+        .replace(/\bYES\b/g, '<span style="color:#22d3ee;font-weight:700">YES</span>')
+        .replace(/\bNO\b/g,  '<span style="color:#fb923c;font-weight:700">NO</span>');
+      return `<div class="${color}">${hl}</div>`;
     }).join('');
     ll.scrollTop = ll.scrollHeight;
 
@@ -463,6 +485,12 @@ async function poll() {
           <td>${isOpen
             ? '<span style="color:#60a5fa;font-size:10px;background:rgba(96,165,250,.1);padding:1px 6px;border-radius:4px">OPEN</span>'
             : '<span style="color:#fb923c;font-size:10px;background:rgba(251,146,60,.1);padding:1px 6px;border-radius:4px">CLOSE</span>'}</td>
+          <td>${(h.side||'') === 'YES'
+            ? '<span style="color:#22d3ee;font-size:10px;background:rgba(34,211,238,.12);padding:1px 7px;border-radius:4px;font-weight:700">YES</span>'
+            : (h.side||'') === 'NO'
+              ? '<span style="color:#fb923c;font-size:10px;background:rgba(251,146,60,.12);padding:1px 7px;border-radius:4px;font-weight:700">NO</span>'
+              : '<span class="text-slate-600">—</span>'
+          }</td>
           <td class="font-mono text-slate-300">$${Number(h.strike||0).toLocaleString()}</td>
           <td class="font-mono text-slate-400">${h.tokens||'—'}</td>
           <td class="font-mono">${h.entry_price||'—'}</td>

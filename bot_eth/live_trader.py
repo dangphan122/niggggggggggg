@@ -26,6 +26,7 @@ try:
     CLOB_AVAILABLE = True
 except ImportError:
     CLOB_AVAILABLE = False
+    POLYGON = 137  # Fallback to prevent NameError in LiveExecutor signature
     log.warning("py_clob_client not installed — live execution disabled")
 
 # Config

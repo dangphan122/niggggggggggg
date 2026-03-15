@@ -378,7 +378,7 @@ class TradingBot:
                 bid_size = ybk.bb_size()
 
                 action, target_price, avail_size, side = evaluate_execution(
-                    p_real, best_bid, best_ask, MODEL_BUFFER, ask_size, bid_size)
+                    p_real, best_bid, best_ask, MODEL_BUFFER, ask_size, bid_size, sides[strike])
                 if action == "SKIP_TRADE":
                     continue
 

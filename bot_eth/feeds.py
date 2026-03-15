@@ -323,8 +323,7 @@ def parse_strike(q):
 def _parse_event_markets(ev, seen, now):
     brackets = []
     tl = ev.get("title", "").lower()
-    if "ethereum price on" in tl: return brackets
-    if "ethereum" not in tl: return brackets
+    if "ethereum" not in tl and "eth" not in tl: return brackets
     for m in ev.get("markets", []):
         cid = m.get("conditionId", "")
         if cid in seen: continue
@@ -391,7 +390,7 @@ class PolymarketFeed:
         self.brackets = []
         self.books = {}
         self.eth_price = None
-        self.eth_history = deque(maxlen=400)
+        self.eth_history = deque(maxlen=800)
         self._running = False
         self.poly_ok = False
         self.bnc_ok = False
@@ -501,10 +500,12 @@ class PolymarketFeed:
                         try:
                             d = json.loads(msg)
                             if d.get("e") == "trade":
-                                self.eth_price = float(d["p"])
-                                self.eth_history.append(
-                                    {"p": self.eth_price,
-                                     "t": float(d["T"])/1000})
+                                now_t = float(d["T"])/1000
+                                if not self.eth_history or now_t - self.eth_history[-1]["t"] >= 5.0:
+                                    self.eth_price = float(d["p"])
+                                    self.eth_history.append(
+                                        {"p": self.eth_price,
+                                         "t": now_t})
                         except: pass
             except Exception as e:
                 log.warning("Bnc WS: %s", e)

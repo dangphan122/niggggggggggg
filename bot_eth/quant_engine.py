@@ -128,61 +128,33 @@ def frank_wolfe_optimizer(p_states, R_matrix, max_iter=5000, tol=1e-6):
 
 MAX_ENTRY_PRICE = 0.45   # raised from 0.40; near-saturated books still blocked
 
-def evaluate_execution(p_real, best_bid, best_ask, model_buffer=0.02, ask_size=0.0, bid_size=0.0):
-    """
-    Returns (action, target_price, available_size, side)
-    Evaluates both YES and NO sides, capping entry at MAX_ENTRY_PRICE.
-    """
+def evaluate_execution(p_real, best_bid, best_ask, model_buffer=0.02, ask_size=0.0, bid_size=0.0, target_side="YES"):
+    """Evaluates execution ONLY for the pre-selected target_side."""
     if not _ok(p_real) or not _ok(best_bid) or not _ok(best_ask):
-        return ("SKIP_TRADE", 0.0, 0.0, "YES")
+        return ("SKIP_TRADE", 0.0, 0.0, target_side)
     if best_ask <= 0 or best_bid <= 0 or best_ask > 1.0 or best_bid > 1.0:
-        return ("SKIP_TRADE", 0.0, 0.0, "YES")
+        return ("SKIP_TRADE", 0.0, 0.0, target_side)
     
     spread = max(0.0, best_ask - best_bid)
-    dyn_thresh = spread + model_buffer
+    dyn_thresh = (spread * 1.15) + model_buffer  # Applied 1.15 multiplier
 
-    # A. Evaluate YES
-    yes_ask = best_ask
-    yes_edge = p_real - yes_ask
+    if target_side == "YES":
+        ask, bid, size = best_ask, best_bid, ask_size
+        edge = p_real - ask
+        maker_p = bid + 0.001
+        maker_e = p_real - maker_p
+    else:
+        ask, bid, size = 1.0 - best_bid, 1.0 - best_ask, bid_size
+        edge = (1.0 - p_real) - ask
+        maker_p = bid + 0.001
+        maker_e = (1.0 - p_real) - maker_p
 
-    # B. Evaluate NO (Synthetic)
-    no_ask = 1.0 - best_bid
-    no_p_real = 1.0 - p_real
-    no_edge = no_p_real - no_ask
+    if edge >= dyn_thresh:
+        return ("TAKER_FAK", ask, size, target_side)
+    elif maker_e >= model_buffer:
+        return ("MAKER_POST_ONLY", maker_p, 0.0, target_side)
 
-    # C. Price Ceiling Check
-    valid_yes = yes_ask <= MAX_ENTRY_PRICE
-    valid_no  = no_ask  <= MAX_ENTRY_PRICE
-
-    # D. Winner-Takes-All Evaluation (Taker prioritized over Maker)
-    yes_taker = valid_yes and yes_edge >= dyn_thresh
-    no_taker  = valid_no  and no_edge  >= dyn_thresh
-
-    if yes_taker and not no_taker:
-        return ("TAKER_FAK", yes_ask, ask_size, "YES")
-    elif no_taker and not yes_taker:
-        return ("TAKER_FAK", no_ask, bid_size, "NO")
-    elif yes_taker and no_taker:
-        if yes_edge >= no_edge: return ("TAKER_FAK", yes_ask, ask_size, "YES")
-        else: return ("TAKER_FAK", no_ask, bid_size, "NO")
-
-    yes_maker_p = best_bid + 0.001
-    yes_maker_e = p_real - yes_maker_p
-    yes_maker = valid_yes and yes_maker_e >= model_buffer
-
-    no_maker_p = (1.0 - best_ask) + 0.001
-    no_maker_e = no_p_real - no_maker_p
-    no_maker = valid_no and no_maker_e >= model_buffer
-
-    if yes_maker and not no_maker:
-        return ("MAKER_POST_ONLY", yes_maker_p, 0.0, "YES")
-    elif no_maker and not yes_maker:
-        return ("MAKER_POST_ONLY", no_maker_p, 0.0, "NO")
-    elif yes_maker and no_maker:
-        if yes_maker_e >= no_maker_e: return ("MAKER_POST_ONLY", yes_maker_p, 0.0, "YES")
-        else: return ("MAKER_POST_ONLY", no_maker_p, 0.0, "NO")
-
-    return ("SKIP_TRADE", 0.0, 0.0, "YES")
+    return ("SKIP_TRADE", 0.0, 0.0, target_side)
 
 
 # =====================================================================

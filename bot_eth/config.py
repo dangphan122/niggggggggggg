@@ -14,7 +14,7 @@ MAX_GLOBAL_EXPOSURE   = 0.30   # 30% of initial capital max in-market at once
 MAX_EXPOSURE_PER_DATE = 0.15   # 15% max across all positions sharing same expiry date
 
 # ── Dimension 3: Fractional Kelly Multiplier ──────────────────────────
-KELLY_FRACTION        = 0.15   # use 15% of raw Kelly output (conservative half-Kelly)
+KELLY_FRACTION        = 0.25   # use 15% of raw Kelly output (conservative half-Kelly)
 
 # ── Probability-Tiered Position Caps ──────────────────────────────────
 # Applied AFTER Kelly fraction, BEFORE portfolio gates
@@ -25,7 +25,7 @@ TIER_STANDARD_CAP        = 0.030  # 3.0% of initial capital
 TIER_LOTTO_CAP           = 0.015  # 1.5% of initial capital (deep OTM)
 
 # ── Dust Threshold ────────────────────────────────────────────────────
-MIN_EXECUTION_WEIGHT = 0.005   # skip if final weight < 0.5% (not worth it)
+MIN_EXECUTION_WEIGHT = 0.001   # skip if final weight < 0.5% (not worth it)
 
 
 # ── Unified Defense Architecture ──────────────────────────────────────────

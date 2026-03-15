@@ -126,7 +126,7 @@ def frank_wolfe_optimizer(p_states, R_matrix, max_iter=5000, tol=1e-6):
 # PHASE 3 - Hybrid Execution Logic
 # =====================================================================
 
-MAX_ENTRY_PRICE = 0.40
+MAX_ENTRY_PRICE = 0.45   # raised from 0.40; near-saturated books still blocked
 
 def evaluate_execution(p_real, best_bid, best_ask, model_buffer=0.02, ask_size=0.0, bid_size=0.0):
     """

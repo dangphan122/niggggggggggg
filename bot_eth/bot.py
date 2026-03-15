@@ -170,10 +170,12 @@ class TradingBot:
         """
         spot = self.oracle.spot_price
         if not spot or spot <= 0:
+            self.trader._add_log("DIAG | _evaluate returned: spot=0 or None")
             return
 
         brackets = self.feed.get_brackets()
         if not brackets:
+            self.trader._add_log("DIAG | _evaluate returned: no brackets")
             return
 
         now_ts = datetime.now(timezone.utc).timestamp()
@@ -195,6 +197,7 @@ class TradingBot:
                     mean_r = sum(log_rets) / len(log_rets)
                     rv = (sum((r - mean_r)**2 for r in log_rets) / len(log_rets)) ** 0.5
                     if rv > MOMENTUM_THRESHOLD:
+                        self.trader._add_log(f"REGIME SHIELD | Vol Circuit Breaker rv={rv:.4f} > {MOMENTUM_THRESHOLD} | ALL ENTRIES FROZEN")
                         log.info("REGIME SHIELD | Vol Circuit Breaker ACTIVE rv=%.4f > %.4f | Freezing entries", rv, MOMENTUM_THRESHOLD)
                         return
 
@@ -227,6 +230,7 @@ class TradingBot:
         open_value    = self.trader.open_positions_value(current_bids)
         pending_value = self.trader.pending_makers_value()
         if (open_value + pending_value) / self.trader.initial_capital >= MAX_GLOBAL_EXPOSURE:
+            self.trader._add_log("DIAG | _evaluate returned: global exposure gate hit")
             return
 
         equity = self.trader.total_equity(current_bids)
@@ -253,6 +257,7 @@ class TradingBot:
                 t_years=t_years, exp_code=exp_code, br=br)
 
         if not bd:
+            self.trader._add_log(f"DIAG | _evaluate returned: bd empty (all {len(brackets)} brackets failed IV/p_real check)")
             return
 
         # PASS 2: group by end_ts for Frank-Wolfe
@@ -292,12 +297,23 @@ class TradingBot:
                 spread     = max(0.0, best_ask - best_bid)
                 edge_floor = EDGE_SPREAD_MULTIPLIER * spread  # Layer 3
 
-                valid_yes = yes_ask <= 0.40 and not veto_yes
-                valid_no  = no_ask  <= 0.40 and not veto_no
+                valid_yes = yes_ask <= 0.45 and not veto_yes
+                valid_no  = no_ask  <= 0.45 and not veto_no
 
-                # LAYER 3: Spread-Adjusted Edge Floor — edge must exceed 1.5x spread
+                # LAYER 3: Spread-Adjusted Edge Floor — edge must exceed multiplier*spread
                 valid_yes = valid_yes and yes_edge > edge_floor
                 valid_no  = valid_no  and no_edge  > edge_floor
+
+                # Per-bracket diagnostic (temporary)
+                if not valid_yes and not valid_no:
+                    reasons = []
+                    if yes_ask > 0.95: reasons.append(f"yes_ask={yes_ask:.3f}>0.95")
+                    if no_ask  > 0.95: reasons.append(f"no_ask={no_ask:.3f}>0.95")
+                    if veto_yes: reasons.append("veto_YES")
+                    if veto_no:  reasons.append("veto_NO")
+                    if yes_edge <= edge_floor: reasons.append(f"ye={yes_edge:.4f}<=floor={edge_floor:.4f}")
+                    if no_edge  <= edge_floor: reasons.append(f"ne={no_edge:.4f}<=floor={edge_floor:.4f}")
+                    self.trader._add_log(f"SKIP K=${strike:,} | " + " | ".join(reasons))
 
                 # Choose the side with the better independent spread-adjusted edge
                 if valid_yes and valid_no:
@@ -319,6 +335,7 @@ class TradingBot:
                 info_map[strike]     = info
 
             if not strike_probs:
+                self.trader._add_log(f"DIAG | end_ts group: all {len(items)} brackets rejected by edge/ceiling filters")
                 continue
 
             try:
@@ -366,8 +383,7 @@ class TradingBot:
                     continue
 
                 p_real_eval = p_real if side == "YES" else 1.0 - p_real
-
-                if abs(target_price - p_real_eval) > MAX_PRICE_DEVIATION:
+                if abs(target_price - p_real_eval) > 0.50:
                     self.trader._add_log(
                         f"SKIP | ${strike:,} | STALE BOOK "
                         f"price={target_price:.4f} p_real={p_real_eval:.4f} "

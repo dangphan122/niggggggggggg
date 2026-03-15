@@ -33,7 +33,7 @@ MIN_EXECUTION_WEIGHT = 0.005   # skip if final weight < 0.5% (not worth it)
 # Layer 1: VRP Discount
 # Deribit IV includes a Volatility Risk Premium (IV > RV historically).
 # Discount IV before passing into N(d2) to avoid overstating tail probabilities.
-VRP_DISCOUNT = 0.90            # 10% IV haircut — tune between 0.85-0.95
+VRP_DISCOUNT = 0.97            # 3% IV haircut — tuned for current market
 
 # Layer 2A: Volatility Circuit Breaker
 # Freeze ALL new entries when 15-min realized vol is too high (momentum regime).
@@ -46,10 +46,10 @@ TREND_VETO_PCT = 0.03          # 3% 1-hour price drift triggers the veto
 
 # Layer 3: Spread-Adjusted Edge Floor
 # actual_edge must exceed this multiple of the spread to justify entry.
-EDGE_SPREAD_MULTIPLIER = 1.5   # edge must be > 1.5x spread cost
+EDGE_SPREAD_MULTIPLIER = 1.15   # edge must beat half the spread cost
 # ── Other risk params (kept here for single source of truth) ──────────
 MIN_TRADE_USD          = 5.0
 MAX_PRICE_DEVIATION    = 0.35
-MIN_ASK_LIQUIDITY_USD  = 20.0
+MIN_ASK_LIQUIDITY_USD  = 5.0
 MODEL_BUFFER           = 0.02
 TIME_DISCOUNT_RATE     = 0.01
